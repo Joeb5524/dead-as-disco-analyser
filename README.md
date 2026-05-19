@@ -21,7 +21,7 @@ Download `DeadAsDiscoAnalyzer-Setup-vX.X.X.exe` from the latest GitHub Release a
 
 The portable `RhythmAnalyzer-windows.zip` is also available, but the installer is the easiest option for most testers.
 
-Because the app is not code-signed yet, Windows may still show a SmartScreen warning. A paid code-signing certificate is the proper way to remove most untrusted-publisher warnings.
+Because the app is not code-signed yet, Windows may still show a SmartScreen warning.
 
 ## Local Setup
 
@@ -55,21 +55,8 @@ After choosing a track, click `COPY JSON` to copy a schema-ready JSON payload to
 
 Fields that require human metadata, such as `performedBy` and `writtenBy`, are included as empty arrays so they can be filled in before importing into the game. Tempo changes and offsets are inferred from audio analysis, so they should be treated as a strong starting point rather than hand-authored chart data.
 
-## GitHub Release Build
+This JSON output goes in C:\Users\<you>\AppData\Local\Pagoda\Saved\ImportedSongs\songname
 
-1. Push this project to GitHub.
-2. Create and push a version tag:
-
-```powershell
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-3. The `Build Release` workflow builds `DeadAsDiscoAnalyzer-Setup-vX.X.X.exe` and `RhythmAnalyzer-windows.zip`, then attaches both to the GitHub Release for that tag.
-
-## App Icon
-
-The project includes `assets/discoball.ico`, which is used for the executable and app window. If it is removed, the build script and app fall back to `assets/icon.ico`.
 
 ## Notes
 
