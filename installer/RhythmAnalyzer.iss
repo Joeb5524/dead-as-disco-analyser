@@ -1,6 +1,6 @@
 #define AppName "Dead as Disco Analyzer"
 #ifndef AppVersion
-#define AppVersion "1.1.1"
+#define AppVersion "1.3"
 #endif
 #ifndef RepoDir
 #define RepoDir ".."
