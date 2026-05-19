@@ -6,6 +6,8 @@ import math
 import os
 import queue
 import random
+import shutil
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -35,6 +37,10 @@ LOCAL_TEMPO_WINDOW_SECONDS = 8.0
 TEMPO_MAP_STEP_SECONDS = 4.0
 TEMPO_CHANGE_THRESHOLD_BPM = 5.0
 MIN_TEMPO_SEGMENT_SECONDS = 8.0
+IMPORT_SONGS_PATH_ENV_VAR = "IMPORT_SONGS_PATH"
+OGG_AUDIO_FILENAME = "audio.ogg"
+META_FILENAME = "Meta.JSON"
+FOLDER_NAME_MAX_LENGTH = 120
 
 BG_COLOR = "#070710"
 PANEL_COLOR = "#101022"
@@ -79,6 +85,12 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "copy_json": "КОПИРОВАТЬ JSON",
         "json_copied": "JSON скопирован",
         "json_unavailable": "Сначала проанализируй трек.",
+        "set_import_folder": "УСТАНОВИТЬ ПАПКУ",
+        "save_import": "СОХРАНИТЬ ИМПОРТ",
+        "import_folder_not_set": "Папка импорта не задана",
+        "import_folder_selected": "Папка импорта: {path}",
+        "import_success": "Импорт сохранен в:\n{path}",
+        "import_error": "Не удалось сохранить импорт:\n{error}",
         "patterns": {
             "slow": "медленный балладный",
             "medium": "средний поп/рок",
@@ -120,6 +132,12 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "copy_json": "COPY JSON",
         "json_copied": "JSON copied",
         "json_unavailable": "Analyze a track first.",
+        "set_import_folder": "SET IMPORT FOLDER",
+        "save_import": "EXPORT IMPORT",
+        "import_folder_not_set": "Import folder not configured",
+        "import_folder_selected": "Import folder: {path}",
+        "import_success": "Saved imported song to:\n{path}",
+        "import_error": "Failed to save imported song:\n{error}",
         "patterns": {
             "slow": "slow ballad",
             "medium": "mid pop/rock",
@@ -226,6 +244,86 @@ def format_file_size(size_bytes: int) -> str:
     if size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.1f} KB"
     return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+def get_default_import_root() -> Path | None:
+    env_value = os.environ.get(IMPORT_SONGS_PATH_ENV_VAR, "")
+    if not env_value:
+        return None
+
+    path = Path(env_value).expanduser()
+    return path if path.is_dir() else None
+
+
+def sanitize_folder_name(name: str, max_length: int = FOLDER_NAME_MAX_LENGTH) -> str:
+    invalid_chars = '<>:"/\\|?*'
+    cleaned = "".join(
+        "_" if char in invalid_chars or ord(char) < 32 else char
+        for char in name
+    ).strip()
+    cleaned = cleaned.rstrip(". ")
+    if not cleaned:
+        cleaned = "song"
+    return cleaned[:max_length]
+
+
+def unique_import_folder(root: Path, base_name: str) -> Path:
+    candidate = root / sanitize_folder_name(base_name)
+    if not candidate.exists():
+        return candidate
+
+    for index in range(2, 1000):
+        candidate = root / f"{sanitize_folder_name(base_name)} ({index})"
+        if not candidate.exists():
+            return candidate
+
+    raise RuntimeError("Unable to generate a unique import folder name.")
+
+
+def convert_audio_to_ogg(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.suffix.lower() == ".ogg":
+        shutil.copy2(source, target)
+        return
+
+    ffmpeg_exe = Path(imageio_ffmpeg.get_ffmpeg_exe())
+    command = [
+        str(ffmpeg_exe),
+        "-y",
+        "-i",
+        str(source),
+        "-vn",
+        "-c:a",
+        "libvorbis",
+        "-ar",
+        str(TARGET_SAMPLE_RATE),
+        "-ac",
+        "2",
+        str(target),
+    ]
+
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "ffmpeg failed to convert audio.")
+
+
+def create_import_package(import_root: Path, source_file: Path, game_json: str) -> Path:
+    import_root.mkdir(parents=True, exist_ok=True)
+    song_folder = unique_import_folder(import_root, source_file.stem)
+    audio_target = song_folder / OGG_AUDIO_FILENAME
+    meta_target = song_folder / META_FILENAME
+
+    song_folder.mkdir(parents=True, exist_ok=False)
+    try:
+        convert_audio_to_ogg(source_file, audio_target)
+        meta = json.loads(game_json)
+        meta["audioFileName"] = OGG_AUDIO_FILENAME
+        meta["originalAudioFilePath"] = source_file.resolve().as_posix()
+        meta_target.write_text(json.dumps(meta, indent=4), encoding="utf-8")
+        return song_folder
+    except Exception:
+        shutil.rmtree(song_folder, ignore_errors=True)
+        raise
 
 
 def file_md5(file_path: Path) -> str:
@@ -580,7 +678,14 @@ def analyze_audio_file(file_path: str, lang: str) -> str:
 
 
 def build_ui(root: tk.Tk) -> None:
-    state = {"lang": "en", "busy": False, "job_id": 0, "game_json": ""}
+    state = {
+        "lang": "en",
+        "busy": False,
+        "job_id": 0,
+        "game_json": "",
+        "import_root": get_default_import_root(),
+        "last_file_path": "",
+    }
     analysis_queue: queue.Queue[AnalysisMessage] = queue.Queue()
     particles = [Particle.create(WINDOW_WIDTH, WINDOW_HEIGHT) for _ in range(95)]
 
@@ -595,10 +700,52 @@ def build_ui(root: tk.Tk) -> None:
 
     lang_var = tk.StringVar(value="EN")
     limit_var = tk.StringVar()
+    import_path_var = tk.StringVar()
     initial_result = LANGUAGES[state["lang"]]["placeholder"]
 
     def t() -> dict[str, Any]:
         return LANGUAGES[state["lang"]]
+
+    def update_import_path_text() -> None:
+        root_path = state.get("import_root")
+        if root_path and root_path.exists():
+            import_path_var.set(t()["import_folder_selected"].format(path=str(root_path)))
+        else:
+            import_path_var.set(t()["import_folder_not_set"])
+
+    def refresh_import_button_state() -> None:
+        save_import_btn.config(
+            state=("normal" if state.get("game_json") and state.get("import_root") else "disabled")
+        )
+
+    def select_import_folder() -> None:
+        selected = filedialog.askdirectory(title=t()["set_import_folder"])
+        if not selected:
+            return
+
+        state["import_root"] = Path(selected)
+        update_import_path_text()
+        refresh_import_button_state()
+
+    def save_imported_song() -> None:
+        if state["busy"]:
+            return
+
+        if not state.get("game_json"):
+            messagebox.showinfo(APP_NAME, t()["json_unavailable"])
+            return
+
+        import_root = state.get("import_root")
+        last_file = state.get("last_file_path")
+        if not import_root or not last_file:
+            messagebox.showerror(APP_NAME, t()["import_error"].format(error="No import folder or source file selected."))
+            return
+
+        try:
+            folder = create_import_package(import_root, Path(last_file), state["game_json"])
+            messagebox.showinfo(APP_NAME, t()["import_success"].format(path=str(folder)))
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, t()["import_error"].format(error=str(exc)))
 
     def limit_status_text() -> str:
         return (
@@ -611,6 +758,9 @@ def build_ui(root: tk.Tk) -> None:
         title_label.config(text=f"♪ {t()['title']}")
         choose_btn.config(text=t()["loading"] if state["busy"] else t()["btn"])
         copy_json_btn.config(text=t()["copy_json"])
+        set_import_folder_btn.config(text=t()["set_import_folder"])
+        save_import_btn.config(text=t()["save_import"])
+        update_import_path_text()
         limit_var.set(limit_status_text())
         if not state["busy"]:
             set_result(t()["placeholder"])
@@ -707,6 +857,7 @@ def build_ui(root: tk.Tk) -> None:
             state["game_json"] = message.game_json
             copy_json_btn.config(state="normal")
             set_result(message.payload)
+            refresh_import_button_state()
             return
 
         state["game_json"] = ""
@@ -748,6 +899,7 @@ def build_ui(root: tk.Tk) -> None:
         state["job_id"] += 1
         state["busy"] = True
         state["game_json"] = ""
+        state["last_file_path"] = file_path
         set_result(t()["loading"])
         choose_btn.config(state="disabled", text=t()["loading"])
         copy_json_btn.config(state="disabled", text=t()["copy_json"])
@@ -846,32 +998,79 @@ def build_ui(root: tk.Tk) -> None:
     )
     copy_json_btn.place(relx=0.64, y=170, anchor="n")
 
+    import_path_label = tk.Label(
+        root,
+        textvariable=import_path_var,
+        font=("Courier New", 8),
+        fg=MUTED_TEXT,
+        bg=BG_COLOR,
+    )
+    import_path_label.place(relx=0.5, y=205, anchor="n")
+
+    set_import_folder_btn = tk.Button(
+        root,
+        text=t()["set_import_folder"],
+        font=("Courier New", 9, "bold"),
+        fg=BTN_FG,
+        bg=BTN_BG,
+        activeforeground=TEXT_COLOR,
+        activebackground=BTN_ACTIVE,
+        relief="flat",
+        bd=0,
+        padx=16,
+        pady=8,
+        cursor="hand2",
+        command=select_import_folder,
+    )
+    set_import_folder_btn.place(relx=0.38, y=235, anchor="n")
+
+    save_import_btn = tk.Button(
+        root,
+        text=t()["save_import"],
+        font=("Courier New", 9, "bold"),
+        fg=GOLD,
+        bg=BTN_BG,
+        activeforeground=TEXT_COLOR,
+        activebackground=BTN_ACTIVE,
+        relief="flat",
+        bd=0,
+        padx=16,
+        pady=8,
+        cursor="hand2",
+        command=save_imported_song,
+        state="disabled",
+    )
+    save_import_btn.place(relx=0.64, y=235, anchor="n")
+
+    update_import_path_text()
+    refresh_import_button_state()
+
     panel_shadow = tk.Canvas(
         root,
         width=WINDOW_WIDTH - 68,
-        height=322,
+        height=302,
         bg=PINK,
         highlightthickness=0,
     )
-    panel_shadow.place(relx=0.5, y=230, anchor="n")
+    panel_shadow.place(relx=0.5, y=255, anchor="n")
 
     panel = tk.Canvas(
         root,
         width=WINDOW_WIDTH - 78,
-        height=312,
+        height=292,
         bg=PANEL_COLOR,
         highlightthickness=2,
         highlightbackground=PANEL_BORDER,
     )
-    panel.place(relx=0.5, y=225, anchor="n")
+    panel.place(relx=0.5, y=250, anchor="n")
 
     result_frame = tk.Frame(root, bg=PANEL_COLOR)
     result_frame.place(
         relx=0.5,
-        y=228,
+        y=252,
         anchor="n",
         width=WINDOW_WIDTH - 86,
-        height=304,
+        height=284,
     )
 
     result_text = scrolledtext.ScrolledText(

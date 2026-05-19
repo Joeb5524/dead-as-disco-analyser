@@ -8,6 +8,7 @@ A small Tkinter desktop app that analyzes an audio file, estimates the primary B
 - Estimates the primary BPM of the track
 - Outputs timestamps where the detected BPM changes
 - Copies game-ready JSON after analysis, including tempo sections, beat offsets, a stable ID/seed, file hash, and source file path
+- Can export an analyzed track into an imported songs package with `Meta.JSON` and `audio.ogg`
 - Uses a scrollable results panel for longer tempo maps
 - Caps analysis to the first 15 minutes to avoid runaway CPU and memory use
 - Rejects files larger than 250 MB
@@ -46,7 +47,7 @@ The packaged app will be written to `dist\RhythmAnalyzer`.
 To build the installer locally, install Inno Setup 6 and run:
 
 ```powershell
-.\scripts\build-installer.ps1 -AppVersion 1.1.3
+.\scripts\build-installer.ps1 -AppVersion 1.3
 ```
 
 ## Game JSON Export
@@ -56,7 +57,6 @@ After choosing a track, click `COPY JSON` to copy a schema-ready JSON payload to
 Fields that require human metadata, such as `performedBy` and `writtenBy`, are included as empty arrays so they can be filled in before importing into the game. Tempo changes and offsets are inferred from audio analysis, so they should be treated as a strong starting point rather than hand-authored chart data.
 
 This JSON output goes in C:\Users\<you>\AppData\Local\Pagoda\Saved\ImportedSongs\songname
-
 
 ## Notes
 

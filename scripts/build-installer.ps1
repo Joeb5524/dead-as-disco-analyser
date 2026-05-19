@@ -1,5 +1,5 @@
 param(
-    [string]$AppVersion = "1.1.3"
+    [string]$AppVersion = "1.3"
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +19,7 @@ if (-not $InnoCompiler) {
 }
 
 & $InnoCompiler `
-    (Join-Path $Root "installer\RhythmAnalyzer.iss") `
+(Join-Path $Root "installer\RhythmAnalyzer.iss") `
     "/DAppVersion=$AppVersion" `
     "/DRepoDir=$Root" `
     "/DSourceDir=$AppDir" `
