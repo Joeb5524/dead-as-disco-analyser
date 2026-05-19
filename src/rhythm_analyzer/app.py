@@ -554,6 +554,7 @@ def analyze_audio_result(file_path: str, lang: str) -> AnalysisResult:
         f"{t['size']}:        {format_file_size(size_bytes)}",
         f"{t['overall_bpm']}: {headline_bpm:.1f} BPM",
         f"{t['stability']}:   {stability} (+/-{cv} ms)",
+        f"{t['beatOffset']}:    {format_timestamp(float(beat_frames[0] * HOP_LENGTH / sr))}",
         f"{t['duration']}:    {duration_text}",
         f"{t['samplerate']}:  {sr} Hz",
         "",
@@ -941,3 +942,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
