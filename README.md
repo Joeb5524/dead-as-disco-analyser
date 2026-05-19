@@ -1,11 +1,14 @@
 # Disco Rhythm Analyzer
 
-A small Tkinter desktop app that analyzes an audio file for tempo, broad rhythm pattern, and beat stability. The UI is disco-themed, bilingual, and designed to be packaged as a Windows release with GitHub Actions.
+A small Tkinter desktop app that analyzes an audio file, estimates the primary BPM, and outputs a timestamped map of BPM changes through the track. The UI is disco-themed, bilingual, and designed to be packaged as a Windows release with GitHub Actions.
 
 ## Features
 
 - Supports `.mp3`, `.wav`, `.flac`, `.ogg`, `.aac`, and `.m4a`
-- Caps analysis to the first 180 seconds to avoid runaway CPU and memory use
+- Estimates the primary BPM of the track
+- Outputs timestamps where the detected BPM changes
+- Uses a scrollable results panel for longer tempo maps
+- Caps analysis to the first 15 minutes to avoid runaway CPU and memory use
 - Rejects files larger than 250 MB
 - Runs audio analysis off the Tkinter main thread
 - Updates Tkinter only from the GUI thread

@@ -9,23 +9,30 @@ import threading
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, scrolledtext
 from typing import Any
 
 import imageio_ffmpeg
 import numpy as np
 from librosa.beat import beat_track
 from librosa.core import frames_to_time, get_duration, load
+from librosa.feature import tempo as estimate_tempo
+from librosa.onset import onset_strength
 
 APP_NAME = "Rhythm Analyzer"
 APP_ID = "DiscoRhythmAnalyzer"
-WINDOW_WIDTH = 560
-WINDOW_HEIGHT = 460
+WINDOW_WIDTH = 680
+WINDOW_HEIGHT = 600
 TARGET_SAMPLE_RATE = 22_050
-MAX_ANALYSIS_SECONDS = 180
+MAX_ANALYSIS_SECONDS = 15 * 60
 MAX_FILE_SIZE_MB = 250
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a"}
+HOP_LENGTH = 512
+LOCAL_TEMPO_WINDOW_SECONDS = 8.0
+TEMPO_MAP_STEP_SECONDS = 4.0
+TEMPO_CHANGE_THRESHOLD_BPM = 5.0
+MIN_TEMPO_SEGMENT_SECONDS = 8.0
 
 BG_COLOR = "#070710"
 PANEL_COLOR = "#101022"
@@ -61,8 +68,12 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "confidence": "Уверен.",
         "stability": "Стабильность",
         "duration": "Анализ",
-        "duration_note": "первые {seconds} сек.",
+        "duration_note": "первые {duration}",
         "samplerate": "Частота",
+        "overall_bpm": "Основной BPM",
+        "tempo_map": "Изменения BPM",
+        "no_changes": "существенных изменений не найдено",
+        "change_count": "Точек изменения",
         "patterns": {
             "slow": "медленный балладный",
             "medium": "средний поп/рок",
@@ -95,8 +106,12 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "confidence": "Confidence",
         "stability": "Stability",
         "duration": "Analyzed",
-        "duration_note": "first {seconds} sec.",
+        "duration_note": "first {duration}",
         "samplerate": "Sample rate",
+        "overall_bpm": "Primary BPM",
+        "tempo_map": "BPM changes",
+        "no_changes": "no significant changes found",
+        "change_count": "Change points",
         "patterns": {
             "slow": "slow ballad",
             "medium": "mid pop/rock",
@@ -150,6 +165,13 @@ class AnalysisMessage:
     payload: str
 
 
+@dataclass(frozen=True)
+class TempoSegment:
+    start_seconds: float
+    end_seconds: float
+    bpm: float
+
+
 def resource_path(relative_path: str) -> Path:
     base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
     return base_path / relative_path
@@ -191,6 +213,24 @@ def format_file_size(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 
+def format_timestamp(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def format_duration_limit(seconds: int, lang: str) -> str:
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes} мин." if lang == "ru" else f"{minutes} min"
+
+    return f"{seconds} сек." if lang == "ru" else f"{seconds} sec"
+
+
 def validate_audio_file(file_path: Path, lang: str) -> int:
     t = LANGUAGES[lang]
 
@@ -214,8 +254,161 @@ def scalar_float(value: object) -> float:
     return float(values[0])
 
 
+def normalize_bpm_to_reference(local_bpm: np.ndarray, reference_bpm: float) -> np.ndarray:
+    local_bpm = np.where(np.isfinite(local_bpm) & (local_bpm > 0), local_bpm, reference_bpm)
+    if reference_bpm <= 0:
+        return local_bpm
+
+    candidates = np.vstack((local_bpm / 2, local_bpm, local_bpm * 2))
+    distances = np.abs(candidates - reference_bpm)
+    best = np.nanargmin(distances, axis=0)
+    return candidates[best, np.arange(local_bpm.size)]
+
+
+def median_bpm(segment: dict[str, Any]) -> float:
+    return float(np.median(segment["bpms"]))
+
+
+def merge_segments(target: dict[str, Any], source: dict[str, Any]) -> None:
+    target["start"] = min(target["start"], source["start"])
+    target["end"] = max(target["end"], source["end"])
+    target["bpms"].extend(source["bpms"])
+
+
+def merge_similar_tempo_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not segments:
+        return segments
+
+    merged = [segments[0]]
+    for segment in segments[1:]:
+        if abs(median_bpm(segment) - median_bpm(merged[-1])) < TEMPO_CHANGE_THRESHOLD_BPM:
+            merge_segments(merged[-1], segment)
+        else:
+            merged.append(segment)
+
+    return merged
+
+
+def merge_short_tempo_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    index = 0
+    while len(segments) > 1 and index < len(segments):
+        segment = segments[index]
+        if segment["end"] - segment["start"] >= MIN_TEMPO_SEGMENT_SECONDS:
+            index += 1
+            continue
+
+        if index == 0:
+            merge_segments(segments[1], segment)
+            del segments[0]
+            continue
+
+        if index == len(segments) - 1:
+            merge_segments(segments[index - 1], segment)
+            del segments[index]
+            continue
+
+        previous_delta = abs(median_bpm(segment) - median_bpm(segments[index - 1]))
+        next_delta = abs(median_bpm(segment) - median_bpm(segments[index + 1]))
+
+        if previous_delta <= next_delta:
+            merge_segments(segments[index - 1], segment)
+            del segments[index]
+        else:
+            merge_segments(segments[index + 1], segment)
+            del segments[index]
+
+    return merge_similar_tempo_segments(segments)
+
+
+def build_tempo_segments(
+    local_bpm: np.ndarray,
+    global_bpm: float,
+    sr: int,
+    duration_seconds: float,
+) -> tuple[TempoSegment, ...]:
+    bpm_curve = np.asarray(local_bpm, dtype=float).reshape(-1)
+    finite_mask = np.isfinite(bpm_curve) & (bpm_curve > 0)
+    if not np.any(finite_mask):
+        return ()
+
+    bpm_curve = normalize_bpm_to_reference(bpm_curve, global_bpm)
+    frame_seconds = HOP_LENGTH / sr
+    frames_per_window = max(1, int(round(TEMPO_MAP_STEP_SECONDS / frame_seconds)))
+    raw_segments: list[dict[str, Any]] = []
+
+    for start_frame in range(0, bpm_curve.size, frames_per_window):
+        end_frame = min(bpm_curve.size, start_frame + frames_per_window)
+        values = bpm_curve[start_frame:end_frame]
+        values = values[np.isfinite(values) & (values > 0)]
+        if values.size == 0:
+            continue
+
+        start = start_frame * frame_seconds
+        end = min(end_frame * frame_seconds, duration_seconds)
+        window_bpm = float(np.median(values))
+
+        if (
+            raw_segments
+            and abs(window_bpm - median_bpm(raw_segments[-1])) < TEMPO_CHANGE_THRESHOLD_BPM
+        ):
+            raw_segments[-1]["end"] = end
+            raw_segments[-1]["bpms"].append(window_bpm)
+        else:
+            raw_segments.append({"start": start, "end": end, "bpms": [window_bpm]})
+
+    raw_segments = merge_short_tempo_segments(raw_segments)
+
+    return tuple(
+        TempoSegment(
+            start_seconds=float(segment["start"]),
+            end_seconds=float(segment["end"]),
+            bpm=round(median_bpm(segment), 1),
+        )
+        for segment in raw_segments
+    )
+
+
+def calc_tempo_map(y: np.ndarray, sr: int, global_bpm: float) -> tuple[TempoSegment, ...]:
+    onset_env = onset_strength(y=y, sr=sr, hop_length=HOP_LENGTH)
+    if onset_env.size < 2 or float(np.max(onset_env)) <= 1e-6:
+        return ()
+
+    local_bpm = estimate_tempo(
+        onset_envelope=onset_env,
+        sr=sr,
+        hop_length=HOP_LENGTH,
+        aggregate=None,
+        ac_size=LOCAL_TEMPO_WINDOW_SECONDS,
+        max_tempo=260,
+    )
+    duration = get_duration(y=y, sr=sr)
+    return build_tempo_segments(local_bpm, global_bpm, sr, duration)
+
+
+def format_tempo_changes(segments: tuple[TempoSegment, ...], lang: str) -> list[str]:
+    t = LANGUAGES[lang]
+    if not segments:
+        return [f"{t['tempo_map']}: {t['no_changes']}"]
+
+    lines = [f"{t['tempo_map']}:"]
+    for segment in segments:
+        lines.append(f"  {format_timestamp(segment.start_seconds)} -> {segment.bpm:.1f} BPM")
+
+    change_count = max(0, len(segments) - 1)
+    lines.append(f"{t['change_count']}: {change_count}")
+    return lines
+
+
+def primary_bpm(segments: tuple[TempoSegment, ...], fallback_bpm: float) -> float:
+    if not segments:
+        return fallback_bpm
+
+    dominant = max(segments, key=lambda segment: segment.end_seconds - segment.start_seconds)
+    return dominant.bpm
+
+
 def calc_rhythm_stability(beat_frames: np.ndarray, sr: int, lang: str) -> tuple[float, str]:
-    beat_times = frames_to_time(beat_frames, sr=sr)
+    beat_times = frames_to_time(beat_frames, sr=sr, hop_length=HOP_LENGTH)
     levels = LANGUAGES[lang]["stability_levels"]
 
     if len(beat_times) < 2:
@@ -268,26 +461,35 @@ def analyze_audio_file(file_path: str, lang: str) -> str:
     if y.size == 0:
         raise ValueError(t["no_audio"])
 
-    tempo_raw, beat_frames = beat_track(y=y, sr=sr)
+    tempo_raw, beat_frames = beat_track(y=y, sr=sr, hop_length=HOP_LENGTH)
     tempo = scalar_float(tempo_raw)
     cv, stability = calc_rhythm_stability(np.asarray(beat_frames), sr, lang)
-    pattern, confidence = classify_tempo(tempo, len(beat_frames), lang)
+    tempo_segments = calc_tempo_map(y, sr, tempo)
+    headline_bpm = primary_bpm(tempo_segments, tempo)
     duration = get_duration(y=y, sr=sr)
     duration_text = f"{duration:.1f} sec"
 
-    if duration >= MAX_ANALYSIS_SECONDS - 0.25:
-        duration_text += f" ({t['duration_note'].format(seconds=MAX_ANALYSIS_SECONDS)})"
+    try:
+        source_duration = get_duration(path=str(path))
+    except Exception:
+        source_duration = duration
 
-    return (
-        f"{t['file']}:        {clean_display_name(path.name)}\n"
-        f"{t['size']}:        {format_file_size(size_bytes)}\n"
-        f"{t['tempo']}:       {tempo:.1f} BPM\n"
-        f"{t['pattern']}:     {pattern}\n"
-        f"{t['confidence']}:  {confidence * 100:.1f}%\n"
-        f"{t['stability']}:   {stability} (+/-{cv} ms)\n"
-        f"{t['duration']}:    {duration_text}\n"
-        f"{t['samplerate']}:  {sr} Hz"
-    )
+    if source_duration > duration + 0.25:
+        limit = format_duration_limit(MAX_ANALYSIS_SECONDS, lang)
+        duration_text += f" ({t['duration_note'].format(duration=limit)})"
+
+    summary_lines = [
+        f"{t['file']}:        {clean_display_name(path.name)}",
+        f"{t['size']}:        {format_file_size(size_bytes)}",
+        f"{t['overall_bpm']}: {headline_bpm:.1f} BPM",
+        f"{t['stability']}:   {stability} (+/-{cv} ms)",
+        f"{t['duration']}:    {duration_text}",
+        f"{t['samplerate']}:  {sr} Hz",
+        "",
+        *format_tempo_changes(tempo_segments, lang),
+    ]
+
+    return "\n".join(summary_lines)
 
 
 def build_ui(root: tk.Tk) -> None:
@@ -305,17 +507,25 @@ def build_ui(root: tk.Tk) -> None:
     canvas.place(x=0, y=0)
 
     lang_var = tk.StringVar(value="EN")
-    result_var = tk.StringVar(value=LANGUAGES[state["lang"]]["placeholder"])
+    limit_var = tk.StringVar()
+    initial_result = LANGUAGES[state["lang"]]["placeholder"]
 
     def t() -> dict[str, Any]:
         return LANGUAGES[state["lang"]]
+
+    def limit_status_text() -> str:
+        return (
+            f"Limit: {MAX_FILE_SIZE_MB} MB • analyzes first "
+            f"{format_duration_limit(MAX_ANALYSIS_SECONDS, state['lang'])}"
+        )
 
     def sync_text() -> None:
         lang_var.set("EN" if state["lang"] == "en" else "RU")
         title_label.config(text=f"♪ {t()['title']}")
         choose_btn.config(text=t()["loading"] if state["busy"] else t()["btn"])
-        if not state["busy"] and not result_var.get().strip():
-            result_var.set(t()["placeholder"])
+        limit_var.set(limit_status_text())
+        if not state["busy"]:
+            set_result(t()["placeholder"])
 
     def draw_mirror_ball(cx: int, cy: int, radius: int, phase: float) -> None:
         canvas.create_oval(
@@ -406,11 +616,11 @@ def build_ui(root: tk.Tk) -> None:
         choose_btn.config(state="normal", text=t()["btn"])
 
         if message.ok:
-            result_var.set(message.payload)
+            set_result(message.payload)
             return
 
         error_text = LANGUAGES[message.lang]["error_load"] + message.payload
-        result_var.set(LANGUAGES[message.lang]["placeholder"])
+        set_result(LANGUAGES[message.lang]["placeholder"])
         messagebox.showerror(LANGUAGES[message.lang]["error"], error_text)
 
     def poll_analysis_queue() -> None:
@@ -443,7 +653,7 @@ def build_ui(root: tk.Tk) -> None:
 
         state["job_id"] += 1
         state["busy"] = True
-        result_var.set(t()["loading"])
+        set_result(t()["loading"])
         choose_btn.config(state="disabled", text=t()["loading"])
 
         thread = threading.Thread(
@@ -456,7 +666,7 @@ def build_ui(root: tk.Tk) -> None:
     def toggle_lang() -> None:
         state["lang"] = "ru" if state["lang"] == "en" else "en"
         if not state["busy"]:
-            result_var.set(t()["placeholder"])
+            set_result(t()["placeholder"])
         sync_text()
 
     lang_btn = tk.Button(
@@ -487,7 +697,7 @@ def build_ui(root: tk.Tk) -> None:
 
     tk.Label(
         root,
-        text="BPM • GROOVE • STABILITY",
+        text="BPM • CHANGES • TIMESTAMPS",
         font=("Courier New", 9, "bold"),
         fg=CYAN,
         bg=BG_COLOR,
@@ -513,7 +723,7 @@ def build_ui(root: tk.Tk) -> None:
     panel_shadow = tk.Canvas(
         root,
         width=WINDOW_WIDTH - 68,
-        height=222,
+        height=322,
         bg=PINK,
         highlightthickness=0,
     )
@@ -522,7 +732,7 @@ def build_ui(root: tk.Tk) -> None:
     panel = tk.Canvas(
         root,
         width=WINDOW_WIDTH - 78,
-        height=212,
+        height=312,
         bg=PANEL_COLOR,
         highlightthickness=2,
         highlightbackground=PANEL_BORDER,
@@ -535,29 +745,40 @@ def build_ui(root: tk.Tk) -> None:
         y=228,
         anchor="n",
         width=WINDOW_WIDTH - 86,
-        height=204,
+        height=304,
     )
 
-    tk.Label(
+    result_text = scrolledtext.ScrolledText(
         result_frame,
-        textvariable=result_var,
         font=("Courier New", 10),
         fg=TEXT_COLOR,
         bg=PANEL_COLOR,
-        justify="left",
-        anchor="nw",
-        padx=16,
-        pady=16,
-        wraplength=WINDOW_WIDTH - 128,
-    ).pack(fill="both", expand=True)
+        insertbackground=TEXT_COLOR,
+        relief="flat",
+        bd=0,
+        padx=14,
+        pady=14,
+        wrap="word",
+        state="disabled",
+    )
+    result_text.pack(fill="both", expand=True)
+
+    def set_result(text: str) -> None:
+        result_text.config(state="normal")
+        result_text.delete("1.0", tk.END)
+        result_text.insert("1.0", text)
+        result_text.config(state="disabled")
+
+    set_result(initial_result)
 
     tk.Label(
         root,
-        text=f"Limit: {MAX_FILE_SIZE_MB} MB • analyzes first {MAX_ANALYSIS_SECONDS} seconds",
+        textvariable=limit_var,
         font=("Courier New", 8),
         fg=MUTED_TEXT,
         bg=BG_COLOR,
-    ).place(relx=0.5, y=438, anchor="center")
+    ).place(relx=0.5, y=578, anchor="center")
+    limit_var.set(limit_status_text())
 
     animate()
     poll_analysis_queue()

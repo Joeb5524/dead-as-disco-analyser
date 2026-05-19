@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "disco-rhythm-analyzer"
-version = "1.0.0"
-description = "A disco-themed desktop app for rhythm and tempo analysis."
+version = "1.1.0"
+description = "A disco-themed desktop app for BPM and tempo-change analysis."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
