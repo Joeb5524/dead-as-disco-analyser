@@ -33,6 +33,16 @@ jobs:
         shell: pwsh
         run: .\scripts\build-windows.ps1
 
+      - name: Smoke test executable startup
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ".\dist\RhythmAnalyzer\RhythmAnalyzer.exe" -PassThru
+          Start-Sleep -Seconds 8
+          if ($process.HasExited) {
+            throw "Executable exited during startup smoke test with code $($process.ExitCode)"
+          }
+          Stop-Process -Id $process.Id -Force
+
       - name: Archive executable
         shell: pwsh
         run: Compress-Archive -Path dist\RhythmAnalyzer\* -DestinationPath RhythmAnalyzer-windows.zip
