@@ -43,6 +43,16 @@ jobs:
           }
           Stop-Process -Id $process.Id -Force
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}" -replace "^v", ""
+          .\scripts\build-installer.ps1 -AppVersion $version
+
       - name: Archive executable
         shell: pwsh
         run: Compress-Archive -Path dist\RhythmAnalyzer\* -DestinationPath RhythmAnalyzer-windows.zip
@@ -50,4 +60,6 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: RhythmAnalyzer-windows.zip
+          files: |
+            dist/DeadAsDiscoAnalyzer-Setup-*.exe
+            RhythmAnalyzer-windows.zip

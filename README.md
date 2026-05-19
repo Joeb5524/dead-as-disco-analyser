@@ -12,7 +12,15 @@ A small Tkinter desktop app that analyzes an audio file, estimates the primary B
 - Rejects files larger than 250 MB
 - Runs audio analysis off the Tkinter main thread
 - Updates Tkinter only from the GUI thread
-- Includes a GitHub Actions workflow that builds a Windows zip on version tags
+- Includes a GitHub Actions workflow that builds a Windows installer and portable zip on version tags
+
+## For Testers
+
+Download `DeadAsDiscoAnalyzer-Setup-vX.X.X.exe` from the latest GitHub Release and run it. You do not need to run PowerShell scripts or build the project yourself.
+
+The portable `RhythmAnalyzer-windows.zip` is also available, but the installer is the easiest option for most testers.
+
+Because the app is not code-signed yet, Windows may still show a SmartScreen warning. A paid code-signing certificate is the proper way to remove most untrusted-publisher warnings.
 
 ## Local Setup
 
@@ -34,6 +42,12 @@ You can also run the VS Code task named `Run app`.
 
 The packaged app will be written to `dist\RhythmAnalyzer`.
 
+To build the installer locally, install Inno Setup 6 and run:
+
+```powershell
+.\scripts\build-installer.ps1 -AppVersion 1.1.2
+```
+
 ## GitHub Release Build
 
 1. Push this project to GitHub.
@@ -44,7 +58,7 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-3. The `Build Release` workflow builds `RhythmAnalyzer-windows.zip` and attaches it to the GitHub Release for that tag.
+3. The `Build Release` workflow builds `DeadAsDiscoAnalyzer-Setup-vX.X.X.exe` and `RhythmAnalyzer-windows.zip`, then attaches both to the GitHub Release for that tag.
 
 ## App Icon
 
