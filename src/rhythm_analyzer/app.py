@@ -82,6 +82,7 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "tempo_map": "Изменения BPM",
         "no_changes": "существенных изменений не найдено",
         "change_count": "Точек изменения",
+        "beatOffset": "Смещение бита",
         "copy_json": "КОПИРОВАТЬ JSON",
         "json_copied": "JSON скопирован",
         "json_unavailable": "Сначала проанализируй трек.",
@@ -129,6 +130,7 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "tempo_map": "BPM changes",
         "no_changes": "no significant changes found",
         "change_count": "Change points",
+        "beatOffset": "Beat offset",
         "copy_json": "COPY JSON",
         "json_copied": "JSON copied",
         "json_unavailable": "Analyze a track first.",
@@ -1072,6 +1074,12 @@ def build_ui(root: tk.Tk) -> None:
         width=WINDOW_WIDTH - 86,
         height=284,
     )
+
+    choose_btn.lift()
+    copy_json_btn.lift()
+    import_path_label.lift()
+    set_import_folder_btn.lift()
+    save_import_btn.lift()
 
     result_text = scrolledtext.ScrolledText(
         result_frame,
