@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 import queue
@@ -74,6 +76,9 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "tempo_map": "Изменения BPM",
         "no_changes": "существенных изменений не найдено",
         "change_count": "Точек изменения",
+        "copy_json": "КОПИРОВАТЬ JSON",
+        "json_copied": "JSON скопирован",
+        "json_unavailable": "Сначала проанализируй трек.",
         "patterns": {
             "slow": "медленный балладный",
             "medium": "средний поп/рок",
@@ -112,6 +117,9 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "tempo_map": "BPM changes",
         "no_changes": "no significant changes found",
         "change_count": "Change points",
+        "copy_json": "COPY JSON",
+        "json_copied": "JSON copied",
+        "json_unavailable": "Analyze a track first.",
         "patterns": {
             "slow": "slow ballad",
             "medium": "mid pop/rock",
@@ -163,6 +171,7 @@ class AnalysisMessage:
     lang: str
     ok: bool
     payload: str
+    game_json: str = ""
 
 
 @dataclass(frozen=True)
@@ -170,6 +179,12 @@ class TempoSegment:
     start_seconds: float
     end_seconds: float
     bpm: float
+
+
+@dataclass(frozen=True)
+class AnalysisResult:
+    summary: str
+    game_json: str
 
 
 def resource_path(relative_path: str) -> Path:
@@ -211,6 +226,19 @@ def format_file_size(size_bytes: int) -> str:
     if size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.1f} KB"
     return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+def file_md5(file_path: Path) -> str:
+    digest = hashlib.md5()
+    with file_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def uint32_from_digest(hex_digest: str, offset: int) -> int:
+    raw = bytes.fromhex(hex_digest)
+    return int.from_bytes(raw[offset : offset + 4], byteorder="little", signed=False)
 
 
 def format_timestamp(seconds: float) -> str:
@@ -407,6 +435,47 @@ def primary_bpm(segments: tuple[TempoSegment, ...], fallback_bpm: float) -> floa
     return dominant.bpm
 
 
+def make_game_json(
+    file_path: Path,
+    file_hash: str,
+    primary_tempo: float,
+    tempo_segments: tuple[TempoSegment, ...],
+    beat_frames: np.ndarray,
+    sr: int,
+    analyzed_duration: float,
+    source_duration: float,
+) -> str:
+    beat_times = frames_to_time(beat_frames, sr=sr, hop_length=HOP_LENGTH)
+    first_beat = float(beat_times[0]) if beat_times.size else 0.0
+    last_beat = float(beat_times[-1]) if beat_times.size else analyzed_duration
+    end_offset = max(0.0, source_duration - last_beat)
+
+    game_data = {
+        "version": 1,
+        "uniqueId": uint32_from_digest(file_hash, 0),
+        "songName": file_path.stem,
+        "performedBy": [],
+        "writtenBy": [],
+        "seed": uint32_from_digest(file_hash, 4),
+        "tempo": int(round(primary_tempo)),
+        "customTempoSections": [
+            {
+                "tempo": int(round(segment.bpm)),
+                "startAbsoluteTime": float(segment.start_seconds),
+            }
+            for segment in tempo_segments[1:]
+        ],
+        "beatOffset": int(round(first_beat * 1000)),
+        "startSongOffset": first_beat,
+        "endSongOffset": end_offset,
+        "uEAssetName": file_path.stem,
+        "originalAudioFileHash": file_hash,
+        "originalAudioFilePath": file_path.resolve().as_posix(),
+    }
+
+    return json.dumps(game_data, indent=4)
+
+
 def calc_rhythm_stability(beat_frames: np.ndarray, sr: int, lang: str) -> tuple[float, str]:
     beat_times = frames_to_time(beat_frames, sr=sr, hop_length=HOP_LENGTH)
     levels = LANGUAGES[lang]["stability_levels"]
@@ -446,10 +515,11 @@ def classify_tempo(tempo: float, beat_count: int, lang: str) -> tuple[str, float
     return patterns["fast"], confidence
 
 
-def analyze_audio_file(file_path: str, lang: str) -> str:
+def analyze_audio_result(file_path: str, lang: str) -> AnalysisResult:
     t = LANGUAGES[lang]
     path = Path(file_path)
     size_bytes = validate_audio_file(path, lang)
+    original_hash = file_md5(path)
 
     y, sr = load(
         str(path),
@@ -463,7 +533,8 @@ def analyze_audio_file(file_path: str, lang: str) -> str:
 
     tempo_raw, beat_frames = beat_track(y=y, sr=sr, hop_length=HOP_LENGTH)
     tempo = scalar_float(tempo_raw)
-    cv, stability = calc_rhythm_stability(np.asarray(beat_frames), sr, lang)
+    beat_frames = np.asarray(beat_frames)
+    cv, stability = calc_rhythm_stability(beat_frames, sr, lang)
     tempo_segments = calc_tempo_map(y, sr, tempo)
     headline_bpm = primary_bpm(tempo_segments, tempo)
     duration = get_duration(y=y, sr=sr)
@@ -489,11 +560,26 @@ def analyze_audio_file(file_path: str, lang: str) -> str:
         *format_tempo_changes(tempo_segments, lang),
     ]
 
-    return "\n".join(summary_lines)
+    game_json = make_game_json(
+        file_path=path,
+        file_hash=original_hash,
+        primary_tempo=headline_bpm,
+        tempo_segments=tempo_segments,
+        beat_frames=beat_frames,
+        sr=sr,
+        analyzed_duration=duration,
+        source_duration=source_duration,
+    )
+
+    return AnalysisResult(summary="\n".join(summary_lines), game_json=game_json)
+
+
+def analyze_audio_file(file_path: str, lang: str) -> str:
+    return analyze_audio_result(file_path, lang).summary
 
 
 def build_ui(root: tk.Tk) -> None:
-    state = {"lang": "en", "busy": False, "job_id": 0}
+    state = {"lang": "en", "busy": False, "job_id": 0, "game_json": ""}
     analysis_queue: queue.Queue[AnalysisMessage] = queue.Queue()
     particles = [Particle.create(WINDOW_WIDTH, WINDOW_HEIGHT) for _ in range(95)]
 
@@ -523,6 +609,7 @@ def build_ui(root: tk.Tk) -> None:
         lang_var.set("EN" if state["lang"] == "en" else "RU")
         title_label.config(text=f"♪ {t()['title']}")
         choose_btn.config(text=t()["loading"] if state["busy"] else t()["btn"])
+        copy_json_btn.config(text=t()["copy_json"])
         limit_var.set(limit_status_text())
         if not state["busy"]:
             set_result(t()["placeholder"])
@@ -616,9 +703,13 @@ def build_ui(root: tk.Tk) -> None:
         choose_btn.config(state="normal", text=t()["btn"])
 
         if message.ok:
+            state["game_json"] = message.game_json
+            copy_json_btn.config(state="normal")
             set_result(message.payload)
             return
 
+        state["game_json"] = ""
+        copy_json_btn.config(state="disabled")
         error_text = LANGUAGES[message.lang]["error_load"] + message.payload
         set_result(LANGUAGES[message.lang]["placeholder"])
         messagebox.showerror(LANGUAGES[message.lang]["error"], error_text)
@@ -633,8 +724,10 @@ def build_ui(root: tk.Tk) -> None:
 
     def run_analysis(job_id: int, file_path: str, lang: str) -> None:
         try:
-            payload = analyze_audio_file(file_path, lang)
-            analysis_queue.put(AnalysisMessage(job_id, lang, True, payload))
+            result = analyze_audio_result(file_path, lang)
+            analysis_queue.put(
+                AnalysisMessage(job_id, lang, True, result.summary, result.game_json)
+            )
         except Exception as exc:
             analysis_queue.put(AnalysisMessage(job_id, lang, False, str(exc)))
 
@@ -653,8 +746,10 @@ def build_ui(root: tk.Tk) -> None:
 
         state["job_id"] += 1
         state["busy"] = True
+        state["game_json"] = ""
         set_result(t()["loading"])
         choose_btn.config(state="disabled", text=t()["loading"])
+        copy_json_btn.config(state="disabled", text=t()["copy_json"])
 
         thread = threading.Thread(
             target=run_analysis,
@@ -668,6 +763,18 @@ def build_ui(root: tk.Tk) -> None:
         if not state["busy"]:
             set_result(t()["placeholder"])
         sync_text()
+
+    def copy_game_json() -> None:
+        game_json = str(state.get("game_json") or "")
+        if not game_json:
+            messagebox.showinfo(APP_NAME, t()["json_unavailable"])
+            return
+
+        root.clipboard_clear()
+        root.clipboard_append(game_json)
+        root.update()
+        copy_json_btn.config(text=t()["json_copied"])
+        root.after(1400, lambda: copy_json_btn.config(text=t()["copy_json"]))
 
     lang_btn = tk.Button(
         root,
@@ -718,7 +825,25 @@ def build_ui(root: tk.Tk) -> None:
         cursor="hand2",
         command=open_file,
     )
-    choose_btn.place(relx=0.5, y=170, anchor="n")
+    choose_btn.place(relx=0.38, y=170, anchor="n")
+
+    copy_json_btn = tk.Button(
+        root,
+        text=t()["copy_json"],
+        font=("Courier New", 11, "bold"),
+        fg=GOLD,
+        bg=BTN_BG,
+        activeforeground=TEXT_COLOR,
+        activebackground=BTN_ACTIVE,
+        relief="flat",
+        bd=0,
+        padx=20,
+        pady=10,
+        cursor="hand2",
+        command=copy_game_json,
+        state="disabled",
+    )
+    copy_json_btn.place(relx=0.64, y=170, anchor="n")
 
     panel_shadow = tk.Canvas(
         root,
