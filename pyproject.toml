@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "disco-rhythm-analyzer"
+version = "1.0.0"
+description = "A disco-themed desktop app for rhythm and tempo analysis."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "imageio-ffmpeg>=0.4.9",
+    "librosa>=0.10.2",
+    "numpy>=1.23",
+    "soundfile>=0.12.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyinstaller>=6.6",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+rhythm-analyzer = "rhythm_analyzer.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
